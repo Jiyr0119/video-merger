@@ -1,19 +1,23 @@
 import os
 import re
 import subprocess
-from typing import List, Tuple
+import concurrent.futures
+import platform
+from typing import List, Tuple, Dict, Optional
 from myproject.subtitle_generator import SubtitleGenerator
 
 class VideoMerger:
-    def __init__(self, input_dir=".", output_dir="."):
+    def __init__(self, input_dir=".", output_dir=".", max_workers=None):
         """初始化视频合并器
         
         Args:
             input_dir (str): 输入视频文件夹路径
             output_dir (str): 输出合并视频的文件夹路径
+            max_workers (int, optional): 并行处理的最大工作线程数，默认为None（使用系统CPU核心数）
         """
         self.input_dir = input_dir
         self.output_dir = output_dir
+        self.max_workers = max_workers or min(os.cpu_count() or 4, 8)  # 限制最大线程数为8
         os.makedirs(output_dir, exist_ok=True)
     
     def natural_sort_key(self, s):
@@ -25,18 +29,26 @@ class VideoMerger:
         return [int(text) if text.isdigit() else text.lower()
                 for text in re.split('([0-9]+)', s)]
     
-    def get_video_files(self, extensions=('.mp4', '.avi', '.mkv', '.mov')):
+    def get_video_files(self, extensions=('.mp4', '.avi', '.mkv', '.mov'), exclude_output=None):
         """获取指定目录下的所有视频文件
         
         Args:
             extensions (tuple): 支持的视频文件扩展名
+            exclude_output (str, optional): 要排除的输出文件名（不包含扩展名）
             
         Returns:
             list: 排序后的视频文件列表
         """
+        # 构建排除列表
+        exclude_files = []
+        if exclude_output:
+            for ext in extensions:
+                exclude_files.append(f"{exclude_output}{ext}")
+                exclude_files.append(f"{exclude_output}_temp{ext}")
+                
         video_files = [
             f for f in os.listdir(self.input_dir)
-            if f.lower().endswith(extensions)
+            if f.lower().endswith(extensions) and (not exclude_output or f not in exclude_files)
         ]
         # 使用自然排序算法对文件名进行排序
         return sorted(video_files, key=self.natural_sort_key)
@@ -84,7 +96,7 @@ class VideoMerger:
             return 0.0
 
     def check_video_info(self, video_files: List[str]) -> List[Tuple[str, float]]:
-        """检查所有视频文件的信息
+        """并行检查所有视频文件的信息
 
         Args:
             video_files (List[str]): 视频文件列表
@@ -95,14 +107,33 @@ class VideoMerger:
         video_info = []
         total_duration = 0
 
-        print("\n检查视频文件信息...")
-        for video in video_files:
-            full_path = os.path.join(self.input_dir, video)
-            duration = self.get_video_duration(full_path)
-            total_duration += duration
-            video_info.append((full_path, duration))
-            print(f"{video}: {duration/60:.2f}分钟")
-
+        print("\n并行检查视频文件信息...")
+        print(f"使用 {self.max_workers} 个工作线程")
+        
+        # 创建完整路径列表
+        full_paths = [os.path.join(self.input_dir, video) for video in video_files]
+        
+        # 使用线程池并行获取视频时长
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # 提交所有任务并获取future对象
+            future_to_video = {executor.submit(self.get_video_duration, path): (path, os.path.basename(path)) 
+                              for path in full_paths}
+            
+            # 处理完成的任务
+            for future in concurrent.futures.as_completed(future_to_video):
+                path, video_name = future_to_video[future]
+                try:
+                    duration = future.result()
+                    total_duration += duration
+                    video_info.append((path, duration))
+                    print(f"{video_name}: {duration/60:.2f}分钟")
+                except Exception as e:
+                    print(f"{video_name}: 处理失败 - {str(e)}")
+                    video_info.append((path, 0.0))
+        
+        # 按原始顺序排序结果
+        video_info.sort(key=lambda x: full_paths.index(x[0]))
+        
         print(f"\n所有视频总时长: {total_duration/60:.2f}分钟")
         return video_info
     
@@ -191,7 +222,7 @@ class VideoMerger:
             return '', ''
 
     def check_codecs_compatibility(self, video_files: List[str]) -> bool:
-        """检查所有视频的编码格式是否兼容
+        """并行检查所有视频的编码格式是否兼容
 
         Args:
             video_files (List[str]): 视频文件列表
@@ -203,9 +234,11 @@ class VideoMerger:
             print("没有视频文件，无法检查编码兼容性")
             return False
             
-        print("\n检查视频编码兼容性...")
+        print("\n并行检查视频编码兼容性...")
         print(f"共有 {len(video_files)} 个视频文件需要检查")
+        print(f"使用 {self.max_workers} 个工作线程")
         
+        # 获取第一个视频的编码作为基准
         first_video = os.path.join(self.input_dir, video_files[0])
         base_video_codec, base_audio_codec = self.get_video_codec(first_video)
         
@@ -215,18 +248,39 @@ class VideoMerger:
             
         print(f"基准编码格式 - 视频: {base_video_codec}, 音频: {base_audio_codec or '无音轨'}")
         
+        # 如果只有一个视频文件，直接返回兼容
+        if len(video_files) == 1:
+            return True
+        
+        # 并行检查其余视频的编码
         incompatible_videos = []
-        for video in video_files[1:]:
-            video_path = os.path.join(self.input_dir, video)
-            video_codec, audio_codec = self.get_video_codec(video_path)
+        remaining_videos = video_files[1:]
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # 创建视频路径和名称的映射
+            video_paths = {os.path.join(self.input_dir, video): video for video in remaining_videos}
             
-            if not video_codec:
-                print(f"警告: 无法获取视频编码 {video}，将视为不兼容")
-                incompatible_videos.append((video, '未知', '未知'))
-                continue
-                
-            if video_codec != base_video_codec or audio_codec != base_audio_codec:
-                incompatible_videos.append((video, video_codec, audio_codec))
+            # 提交所有任务
+            future_to_video = {executor.submit(self.get_video_codec, path): (path, name) 
+                              for path, name in video_paths.items()}
+            
+            # 处理完成的任务
+            for future in concurrent.futures.as_completed(future_to_video):
+                path, video_name = future_to_video[future]
+                try:
+                    video_codec, audio_codec = future.result()
+                    
+                    if not video_codec:
+                        print(f"警告: 无法获取视频编码 {video_name}，将视为不兼容")
+                        incompatible_videos.append((video_name, '未知', '未知'))
+                        continue
+                    
+                    if video_codec != base_video_codec or audio_codec != base_audio_codec:
+                        incompatible_videos.append((video_name, video_codec, audio_codec))
+                        
+                except Exception as e:
+                    print(f"检查编码失败 {video_name}: {str(e)}")
+                    incompatible_videos.append((video_name, '未知', '未知'))
         
         if incompatible_videos:
             print("\n检测到编码不兼容的视频:")
@@ -284,7 +338,7 @@ class VideoMerger:
         )
         return generator.generate_subtitle(video_path, output_format)
 
-    def merge_videos(self, output_name, video_files=None, force_encode=False, auto_split=True, generate_subtitles=False, encode_preset='faster'):
+    def merge_videos(self, output_name, video_files=None, force_encode=False, auto_split=True, generate_subtitles=False, encode_preset='faster', use_hw_accel=True, crf=23, simple_mode=False):
         """合并视频文件
         
         Args:
@@ -303,12 +357,29 @@ class VideoMerger:
                                  slow
                                  slower
                                  veryslow (最慢，质量最高)
+            use_hw_accel (bool): 是否使用硬件加速（如果可用）
+            crf (int): 视频质量参数，范围0-51，值越小质量越高，默认23
+            simple_mode (bool): 简单模式，跳过编码检查直接使用copy模式，速度最快但可能不适用于所有视频
             
         Returns:
             bool: 合并是否成功
         """
+        # 清理可能存在的旧文件
+        output_path = os.path.join(self.output_dir, f"{output_name}.mp4")
+        temp_output_path = os.path.join(self.output_dir, f"{output_name}_temp.mp4")
+        list_file_path = os.path.join(self.input_dir, "filelist.txt")
+        
+        for path in [output_path, temp_output_path, list_file_path]:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                    print(f"已删除旧文件: {os.path.basename(path)}")
+                except Exception as e:
+                    print(f"无法删除文件 {os.path.basename(path)}: {str(e)}")
+        
         if video_files is None:
-            video_files = self.get_video_files()
+            # 获取视频文件时排除输出文件
+            video_files = self.get_video_files(exclude_output=output_name)
         
         if not video_files:
             print("没有找到可合并的视频文件")
@@ -316,8 +387,7 @@ class VideoMerger:
 
         # 首先将所有视频合并成一个完整文件
         temp_output = f"{output_name}_temp"
-        merge_success = self._merge_video_group(temp_output, video_files, force_encode, encode_preset)
-        
+        merge_success = self._merge_video_group(temp_output, video_files, force_encode, encode_preset, use_hw_accel, crf, simple_mode)
         if not merge_success:
             print("视频合并失败，无法继续处理")
             return False
@@ -415,23 +485,97 @@ class VideoMerger:
                 if subtitle_path:
                     print(f"字幕已生成：{os.path.basename(subtitle_path)}")
 
-    def _merge_video_group(self, output_name: str, video_files: List[str], force_encode: bool, encode_preset: str = 'faster'):
+    def _detect_hw_acceleration(self) -> Tuple[str, List[str]]:
+        """检测系统可用的硬件加速选项
+        
+        Returns:
+            Tuple[str, List[str]]: (加速类型, 编码器选项列表)
+        """
+        system = platform.system()
+        hw_type = "none"
+        hw_options = []
+        
+        try:
+            # 检查可用的硬件加速器
+            cmd = ['ffmpeg', '-hide_banner', '-encoders']
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            encoders_output = result.stdout
+            
+            # 根据操作系统选择合适的硬件加速
+            if system == "Darwin":  # macOS
+                if "videotoolbox" in encoders_output:
+                    hw_type = "videotoolbox"
+                    hw_options = [
+                        '-c:v', 'h264_videotoolbox',
+                        '-allow_sw', '1',  # 如果硬件加速失败，允许回退到软件编码
+                        '-b:v', '0'  # 使用CRF模式控制质量
+                    ]
+            elif system == "Windows":
+                if "nvenc" in encoders_output:  # NVIDIA GPU
+                    hw_type = "nvenc"
+                    hw_options = [
+                        '-c:v', 'h264_nvenc',
+                        '-preset', 'p4',  # NVENC预设，p1(最快)到p7(最高质量)
+                        '-tune', 'hq'
+                    ]
+                elif "qsv" in encoders_output:  # Intel Quick Sync
+                    hw_type = "qsv"
+                    hw_options = [
+                        '-c:v', 'h264_qsv',
+                        '-preset', 'faster'
+                    ]
+                elif "amf" in encoders_output:  # AMD GPU
+                    hw_type = "amf"
+                    hw_options = [
+                        '-c:v', 'h264_amf',
+                        '-quality', 'speed'
+                    ]
+            elif system == "Linux":
+                if "nvenc" in encoders_output:  # NVIDIA GPU
+                    hw_type = "nvenc"
+                    hw_options = [
+                        '-c:v', 'h264_nvenc',
+                        '-preset', 'p4',
+                        '-tune', 'hq'
+                    ]
+                elif "vaapi" in encoders_output:  # VAAPI
+                    hw_type = "vaapi"
+                    hw_options = [
+                        '-vaapi_device', '/dev/dri/renderD128',
+                        '-vf', 'format=nv12,hwupload',
+                        '-c:v', 'h264_vaapi'
+                    ]
+                elif "qsv" in encoders_output:  # Intel Quick Sync
+                    hw_type = "qsv"
+                    hw_options = [
+                        '-c:v', 'h264_qsv',
+                        '-preset', 'faster'
+                    ]
+            
+            if hw_type != "none":
+                print(f"检测到可用的硬件加速: {hw_type}")
+            else:
+                print("未检测到支持的硬件加速，将使用软件编码")
+                
+        except Exception as e:
+            print(f"检测硬件加速时出错: {str(e)}")
+            print("将使用软件编码")
+            hw_type = "none"
+            hw_options = []
+            
+        return hw_type, hw_options
+    
+    def _merge_video_group(self, output_name: str, video_files: List[str], force_encode: bool, encode_preset: str = 'faster', use_hw_accel: bool = True, crf: int = 23, simple_mode: bool = False):
         """合并一组视频文件
 
         Args:
             output_name (str): 输出文件名（不包含扩展名）
             video_files (List[str]): 要合并的视频文件列表
             force_encode (bool): 是否强制重新编码
-            encode_preset (str): FFmpeg编码速度预设，可选值：
-                                 ultrafast (最快，质量最低)
-                                 superfast (非常快，质量较低)
-                                 veryfast (很快，质量较低)
-                                 faster (较快，质量适中，默认)
-                                 fast (快，质量较好)
-                                 medium (中等，平衡速度和质量)
-                                 slow (慢，质量好)
-                                 slower (较慢，质量很好)
-                                 veryslow (非常慢，质量最高)
+            encode_preset (str): FFmpeg编码速度预设
+            use_hw_accel (bool): 是否使用硬件加速
+            crf (int): 视频质量参数，范围0-51，值越小质量越高
+            simple_mode (bool): 简单模式，跳过编码检查直接使用copy模式
         """
         print(f"找到 {len(video_files)} 个视频文件，准备合并...")
         for i, video in enumerate(video_files, 1):
@@ -445,38 +589,71 @@ class VideoMerger:
         list_file = self.create_merge_list(video_files)
         output_path = os.path.join(self.output_dir, f"{output_name}.mp4")
 
-        # 检查编码格式兼容性
-        codecs_compatible = self.check_codecs_compatibility(video_files)
+        # 检查编码格式兼容性（除非使用简单模式）
+        codecs_compatible = True if simple_mode else self.check_codecs_compatibility(video_files)
 
         # 构建FFmpeg命令
-        if force_encode or not codecs_compatible:
-            # 使用重编码模式，确保时间同步
+        if force_encode or (not codecs_compatible and not simple_mode):
+            # 检测硬件加速选项
+            hw_type, hw_options = "none", []
+            if use_hw_accel:
+                hw_type, hw_options = self._detect_hw_acceleration()
+            
+            # 基础命令
             cmd = [
                 'ffmpeg',
-                '-nostats',  # 添加此参数
+                '-y',  # 自动覆盖输出文件
+                '-nostats',  # 不显示详细统计信息
                 '-f', 'concat',
                 '-safe', '0',
                 '-i', list_file,
-                '-c:v', 'libx264',  # 视频编码器
-                '-c:a', 'aac',      # 音频编码器
-                '-preset', encode_preset, # 编码速度预设
-                '-crf', '23',        # 视频质量
-                '-progress', '-', # 输出进度信息
-                output_path
+                '-threads', str(self.max_workers),  # 使用多线程
+                '-max_muxing_queue_size', '1024',  # 增加复用队列大小，避免某些错误
             ]
-            print(f"使用编码预设: {encode_preset}")
-
+            
+            # 添加视频编码选项
+            if hw_type != "none":
+                # 使用硬件加速
+                cmd.extend(hw_options)
+                print(f"使用硬件加速: {hw_type}")
+            else:
+                # 使用软件编码
+                cmd.extend([
+                    '-c:v', 'libx264',
+                    '-preset', encode_preset,
+                    '-crf', str(crf),
+                ])
+                print(f"使用软件编码预设: {encode_preset}, 质量: CRF {crf}")
+            
+            # 音频编码选项
+            cmd.extend([
+                '-c:a', 'aac',
+                '-b:a', '192k',  # 音频比特率
+            ])
+            
+            # 其他优化选项
+            cmd.extend([
+                '-movflags', '+faststart',  # 优化网络播放
+                '-progress', '-',  # 输出进度信息
+            ])
+            
+            # 输出文件
+            cmd.append(output_path)
+            
             if not force_encode:
                 print("\n检测到视频编码格式不一致，将使用重编码模式...")
         else:
             # 使用直接拷贝模式
             cmd = [
                 'ffmpeg',
+                '-y',  # 自动覆盖输出文件
                 '-f', 'concat',
                 '-safe', '0',
                 '-i', list_file,
                 '-c', 'copy',
-                '-progress', '-', # 输出进度信息
+                '-max_muxing_queue_size', '1024',  # 增加复用队列大小，避免某些错误
+                '-movflags', '+faststart',  # 优化网络播放
+                '-progress', '-',  # 输出进度信息
                 output_path
             ]
             print("\n检测到视频编码格式一致，将使用快速合并模式...")
@@ -549,9 +726,16 @@ class VideoMerger:
 
 def main():
     # 使用示例
+    input_dir = "/Users/jonathan/Movies/87.有眼不识真锦鲤（35集）刘凯&尹玲"  # 输入视频所在文件夹
+    output_dir = "/Users/jonathan/Movies/87.有眼不识真锦鲤（35集）刘凯&尹玲"  # 输出文件夹
+    
+    # 使用文件夹名称作为输出文件名
+    folder_name = os.path.basename(input_dir)
+    
     merger = VideoMerger(
-        input_dir="/Users/jonathan/Movies/87.有眼不识真锦鲤（35集）刘凯&尹玲",  # 输入视频所在文件夹
-        output_dir="/Users/jonathan/Movies/87.有眼不识真锦鲤（35集）刘凯&尹玲"  # 输出文件夹
+        input_dir=input_dir,
+        output_dir=output_dir,
+        max_workers=8  # 设置并行处理的最大线程数
     )
     
     # 合并视频，根据编码兼容性自动选择是否重编码
@@ -562,9 +746,12 @@ def main():
     # - 平衡速度和质量: 'faster', 'fast', 'medium'
     # - 追求质量: 'slow', 'slower', 'veryslow'
     merger.merge_videos(
-        "merged_video", 
-        force_encode=False,  # 设为False以允许在编码兼容时使用更快的直接拷贝模式
-        encode_preset='faster'  # 较快的编码速度，质量适中
+        folder_name,  # 使用文件夹名称作为输出文件名
+        force_encode=False,      # 设为False以允许在编码兼容时使用更快的直接拷贝模式
+        encode_preset='ultrafast',  # 最快的编码速度
+        use_hw_accel=True,      # 启用硬件加速（如果可用）
+        crf=28,                 # 稍微降低质量以提高速度（值越大，质量越低，速度越快）
+        simple_mode=True         # 使用简单模式，直接使用copy模式，速度最快
     )
 
 if __name__ == "__main__":
