@@ -8,7 +8,8 @@ setup(
     install_requires=[
         "ffmpeg-python",
         "vosk",
-        "srt"
+        "srt",
+        "python-docx"
     ],
     author="Jonathan",
     author_email="jonathan@example.com",

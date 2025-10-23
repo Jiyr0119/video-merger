@@ -12,6 +12,7 @@
 - **字幕生成**：可选择性地为合并后的视频生成字幕
 - **进度显示**：实时显示合并进度
 - **编码预设**：支持多种编码预设，平衡速度和质量
+- **DOCX文档格式化**：批量处理DOCX文档，规范化标题格式
 
 ## 系统要求
 
@@ -66,6 +67,82 @@ merger = VideoMerger(
 merger.merge_videos("合并后的视频名称")
 ```
 
+### DOCX文档格式化
+
+```python
+from myproject.docx_formatter import DocxFormatter
+
+# 初始化DOCX格式化器
+formatter = DocxFormatter()
+
+# 格式化单个DOCX文档
+result = formatter.format_document("/path/to/document.docx")
+print(f"处理完成: {result}")
+
+# 批量格式化目录中的所有DOCX文件
+results = formatter.batch_format_documents("/path/to/docx/files", recursive=True)
+for result in results:
+    print(f"文件: {result['file']}, 处理段落数: {result.get('paragraphs_processed', 0)}")
+```
+
+### 使用Word默认样式
+
+```python
+# 使用Word默认样式（标题1, 标题2, 正文等）
+formatter = DocxFormatter(use_default_styles=True)
+result = formatter.format_document("input.docx", "output.docx")
+```
+
+### 无命令行参数版本
+
+对于不想使用命令行参数的用户，项目提供了直接在代码中配置参数的方式：
+
+```python
+# 直接运行配置脚本
+python format_docs.py
+
+# 或者运行示例配置
+python examples/docx_formatting_config.py
+```
+
+在代码中直接配置参数：
+
+```python
+from myproject.docx_formatter import DocxFormatter
+
+# 配置参数
+input_path = "path/to/your/document.docx"  # 输入文件或目录
+output_path = "path/to/output/document.docx"  # 输出文件或目录
+title_font = "黑体"  # 标题字体（可选）
+body_font = "宋体"  # 正文字体（可选）
+use_default_styles = True  # 使用Word默认样式（可选）
+recursive = False  # 是否递归处理子目录
+
+# 创建格式化器并处理
+formatter = DocxFormatter(
+    title_font=title_font, 
+    body_font=body_font,
+    use_default_styles=use_default_styles
+)
+result = formatter.format_document(input_path, output_path)
+```
+
+### 命令行使用DOCX格式化
+
+```bash
+# 格式化单个文件
+python -m myproject.docx_formatter /path/to/document.docx
+
+# 批量格式化目录中的文件
+python -m myproject.docx_formatter /path/to/docx/files
+
+# 使用Word默认样式
+python -m myproject.docx_formatter /path/to/document.docx -ds
+
+# 递归处理子目录
+python -m myproject.docx_formatter /path/to/docx/files -r
+```
+
 ### 高级用法
 
 ```python
@@ -84,6 +161,24 @@ merger.merge_videos(
     auto_split=False  # 不自动分割
 )
 ```
+
+## DOCX格式化功能说明
+
+DOCX格式化工具可以帮助您:
+
+1. 自动移除标题前的无关字符（如"xx标题1" → "标题1"）
+2. 标准化章节标题格式（如"第1章"、"第二节"、"附录A"等）
+3. 批量处理多个DOCX文档
+4. 处理文档中的段落和表格内容
+5. 设置标题和正文字体
+6. 应用Word默认样式（标题1, 标题2, 正文等）
+7. 生成新文档而不是覆盖原文档
+
+支持的标题格式包括:
+- 数字章节：第1章、第2节、第3部分
+- 中文数字章节：第一章、第二部分、第三节
+- 附录格式：附录A、附录一
+- 简单章节：1章、2节、3部分
 
 ## 编码预设选项
 
@@ -109,8 +204,13 @@ merger.merge_videos(
 │   └── myproject/
 │       ├── __init__.py
 │       ├── video_merger.py    # 视频合并核心功能
-│       └── subtitle_generator.py  # 字幕生成功能
+│       ├── subtitle_generator.py  # 字幕生成功能
+│       └── docx_formatter.py  # DOCX文档格式化功能
 ├── tests/                     # 测试文件
+├── examples/                  # 使用示例
+│   ├── basic_usage.py
+│   ├── advanced_usage.py
+│   └── docx_formatting_example.py  # DOCX格式化使用示例
 ├── input/                     # 输入视频目录
 ├── output/                    # 输出视频目录
 ├── requirements.txt           # 项目依赖
@@ -127,6 +227,9 @@ A: 如果视频编码格式兼容，设置`force_encode=False`可以显著提高
 
 ### Q: 如何提高输出视频质量？
 A: 使用更高质量的编码预设，如`encode_preset='slow'`或`'veryslow'`。
+
+### Q: DOCX格式化工具提示缺少依赖怎么办？
+A: 安装DOCX处理依赖：`pip install python-docx`
 
 ## 贡献指南
 
@@ -146,4 +249,5 @@ A: 使用更高质量的编码预设，如`encode_preset='slow'`或`'veryslow'`�
 
 - [FFmpeg](https://ffmpeg.org/) - 强大的视频处理工具
 - [Vosk](https://alphacephei.com/vosk/) - 离线语音识别工具
+- [python-docx](https://python-docx.readthedocs.io/) - DOCX文档处理库
 - 所有贡献者和用户

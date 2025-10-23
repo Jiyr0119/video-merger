@@ -3,6 +3,9 @@ vosk>=0.3.44
 srt>=0.0.0
 ffmpeg-python>=0.0.0
 
+# 文档处理
+python-docx>=0.8.11
+
 # 测试和代码质量（可选）
 pytest>=7.0.0
 pytest-cov>=4.0.0

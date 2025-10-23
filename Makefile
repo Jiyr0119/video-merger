@@ -1,4 +1,4 @@
-.PHONY: clean clean-test clean-pyc clean-build help
+.PHONY: clean clean-test clean-pyc clean-build help install-docx
 
 help:
 	@echo "清理命令:"
@@ -13,6 +13,8 @@ help:
 	@echo "构建命令:"
 	@echo "  build      - 构建包"
 	@echo "  install    - 安装包"
+	@echo "依赖命令:"
+	@echo "  install-docx - 安装DOCX处理依赖"
 
 clean: clean-build clean-pyc clean-test
 
@@ -64,3 +66,8 @@ build: clean
 install: clean
 	@echo "安装包..."
 	pip install -e .
+
+
+install-docx:
+	@echo "安装DOCX处理依赖..."
+	pip install python-docx
